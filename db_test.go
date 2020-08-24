@@ -120,12 +120,12 @@ func TestGetFowardRelationships(t *testing.T) {
 		}
 	}()
 
-	expectedRel := foreignKeyRel{
+	expectedRel := foreignKeyConstraint{
 		table: tbl2, referencedTable: tbl1,
 		tableCol: "c3", referencedTableCol: "c1",
 	}
 
-	rels, err := fowardRelationships(context.TODO(), db, tbl2)
+	rels, err := fowardRelationships(context.TODO(), db, targetSchemaName, tbl2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,12 +178,12 @@ func TestGetReverseRelationships(t *testing.T) {
 		}
 	}()
 
-	expectedRel := foreignKeyRel{
+	expectedRel := foreignKeyConstraint{
 		table: tbl2, referencedTable: tbl1,
 		tableCol: "c3", referencedTableCol: "c1",
 	}
 
-	rels, err := reverseRelationships(context.TODO(), db, tbl1)
+	rels, err := reverseRelationships(context.TODO(), db, targetSchemaName, tbl1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,18 +205,42 @@ func TestSample(t *testing.T) {
 
 	targetSchema, sampleSchema := "dev_vrp", fmt.Sprintf("test_sample_schema_%d", time.Now().Unix())
 	err = copySchema(context.TODO(), db, targetSchema, sampleSchema, map[string]struct{}{})
-	// defer func() {
-	// 	_, err := db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s;", sampleSchema))
-	// 	if err != nil {
-	// 		log.Printf("err during clean up: %s\n", err)
-	// 	}
-	// }()
+	defer func() {
+		_, err := db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s;", sampleSchema))
+		if err != nil {
+			log.Printf("err during clean up: %s\n", err)
+		}
+	}()
 	if err != nil {
 		log.Fatalf("could not copy schema: %s", err)
 	}
-	err = sample(context.TODO(), db, targetSchema, sampleSchema, "project_project")
+	err = sample(context.TODO(), db, targetSchema, sampleSchema, "project_project", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 }
+
+// func TestSample(t *testing.T) {
+// 	db, err := connectDB("mysql", "localhost", "3308", "root", "root")
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+
+// 	targetSchema, sampleSchema := "employees", fmt.Sprintf("test_sample_schema_%d", time.Now().Unix())
+// 	err = copySchema(context.TODO(), db, targetSchema, sampleSchema, map[string]struct{}{})
+// 	defer func() {
+// 		_, err := db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s;", sampleSchema))
+// 		if err != nil {
+// 			log.Printf("err during clean up: %s\n", err)
+// 		}
+// 	}()
+// 	if err != nil {
+// 		log.Fatalf("could not copy schema: %s", err)
+// 	}
+// 	err = sample(context.TODO(), db, targetSchema, sampleSchema, "employees", nil)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+
+// }

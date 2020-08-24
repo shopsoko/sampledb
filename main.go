@@ -55,20 +55,27 @@ func main() {
 	}
 
 	for whitelistedTable := range noSmplTbls {
-		err = sample(context.TODO(), db, *targetSchema, sampleSchemaName, whitelistedTable)
+		err = sample(context.TODO(), db, *targetSchema, sampleSchemaName, whitelistedTable, nil)
 		if err != nil {
 			log.Fatalf("could not sample db: %s", err)
 		}
 	}
 
-	err = sample(context.TODO(), db, *targetSchema, sampleSchemaName, *anchorTable)
+	err = sample(context.TODO(), db, *targetSchema, sampleSchemaName, *anchorTable, nil)
 	if err != nil {
 		log.Fatalf("could not sample db: %s", err)
 	}
 }
 
 func connectDB(driver, host, port, user, pass string) (*sql.DB, error) {
-	return sql.Open(driver, fmt.Sprintf("%s:%s@tcp(%s:%s)/", user, pass, host, port))
+	db, err := sql.Open(driver, fmt.Sprintf("%s:%s@tcp(%s:%s)/?multiStatements=true&max_execution_time=1000", user, pass, host, port))
+	if err != nil {
+		return nil, err
+	}
+	db.SetConnMaxLifetime(5 * time.Second)
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(100)
+	return db, db.Ping()
 }
 
 // perms: requires SHOW VIEW privilege
@@ -132,24 +139,52 @@ func copySchema(ctx context.Context, db *sql.DB, targetSchema, sampleSchema stri
 	return tx.Commit()
 }
 
-type foreignKeyRel struct {
+type foreignKeyConstraint struct {
 	table              string
-	referencedTable    string
 	tableCol           string
+	referencedTable    string
 	referencedTableCol string
-	reverse            bool
+	// if true, make sure you call norm()..bad but for now WEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE!
+	reverse bool
 }
 
-// returns columns and the tables that are referenced by the targetTable via FOREIGN KEY constraints
-func fowardRelationships(ctx context.Context, db *sql.DB, targetTable string) ([]foreignKeyRel, error) {
+type primaryKeyConstraint struct {
+	table    string
+	tableCol []string
+}
+
+// get table primary key constraint
+func getTablePrimaryKeyConstraints(ctx context.Context, db *sql.DB, schema, table string) (*primaryKeyConstraint, error) {
 	rows, err := db.QueryContext(ctx,
-		fmt.Sprintf("SELECT column_name, referenced_column_name, referenced_table_name FROM information_schema.key_column_usage WHERE table_name = '%s' AND referenced_table_name != 'NULL';",
-			targetTable))
+		fmt.Sprintf("SELECT DISTINCT(column_name) FROM information_schema.key_column_usage WHERE table_name = '%s' AND table_schema = '%s' AND constraint_name = 'PRIMARY';",
+			table, schema))
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
+	cols := []string{}
+	for rows.Next() {
+		var colName string
+		err = rows.Scan(&colName)
+		if err != nil {
+			return nil, err
+		}
+		cols = append(cols, colName)
+	}
+	return &primaryKeyConstraint{table: table, tableCol: cols}, nil
+}
+
+// returns columns and the tables that are referenced by the targetTable via FOREIGN KEY constraints
+func fowardRelationships(ctx context.Context, db *sql.DB, schema, table string) ([]foreignKeyConstraint, error) {
+	rows, err := db.QueryContext(ctx,
+		fmt.Sprintf("SELECT column_name, referenced_column_name, referenced_table_name FROM information_schema.key_column_usage WHERE table_schema = '%s' AND table_name = '%s' AND referenced_table_name != 'NULL';",
+			schema, table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	cols := map[string]struct{}{}
-	rels := []foreignKeyRel{}
+	rels := []foreignKeyConstraint{}
 	for rows.Next() {
 		var colName, refColName, refTableName string
 		err = rows.Scan(&colName, &refColName, &refTableName)
@@ -158,8 +193,8 @@ func fowardRelationships(ctx context.Context, db *sql.DB, targetTable string) ([
 		}
 		if _, exists := cols[colName]; !exists {
 			cols[colName] = struct{}{}
-			rels = append(rels, foreignKeyRel{
-				table: targetTable, referencedTable: refTableName,
+			rels = append(rels, foreignKeyConstraint{
+				table: table, referencedTable: refTableName,
 				tableCol: colName, referencedTableCol: refColName,
 			})
 		}
@@ -168,231 +203,196 @@ func fowardRelationships(ctx context.Context, db *sql.DB, targetTable string) ([
 }
 
 // returns columns and the tables that reference the targetTable via FOREIGN KEY constraints
-func reverseRelationships(ctx context.Context, db *sql.DB, targetTable string) ([]foreignKeyRel, error) {
+func reverseRelationships(ctx context.Context, db *sql.DB, schema, table string) ([]foreignKeyConstraint, error) {
 	rows, err := db.QueryContext(ctx,
-		fmt.Sprintf("SELECT table_name, column_name, referenced_column_name FROM information_schema.key_column_usage WHERE referenced_table_name = '%s';",
-			targetTable))
+		fmt.Sprintf("SELECT table_name, column_name, referenced_column_name FROM information_schema.key_column_usage WHERE table_schema = '%s' AND referenced_table_name = '%s';",
+			schema, table))
 	if err != nil {
 		return nil, err
 	}
-	rels := []foreignKeyRel{}
+	defer rows.Close()
+	rels := []foreignKeyConstraint{}
 	for rows.Next() {
 		var colName, refColName, tableName string
 		err = rows.Scan(&tableName, &colName, &refColName)
 		if err != nil {
 			return nil, err
 		}
-		rels = append(rels, foreignKeyRel{
-			table: tableName, referencedTable: targetTable,
+		rels = append(rels, foreignKeyConstraint{
+			reverse: true,
+			table:   tableName, referencedTable: table,
 			tableCol: colName, referencedTableCol: refColName,
 		})
 	}
 	return rels, nil
 }
 
-func makeInsertQuery(rowdata map[string]interface{}, db *sql.DB, schema, table string) (string, []interface{}, error) {
-	if len(rowdata) == 0 {
-		return "", nil, sql.ErrNoRows
+func makeInsertQuery(refColName string, refColData interface{}, targetSchema, sampleSchema, table string) (string, error) {
+	if refColData == nil {
+		return "", sql.ErrNoRows
 	}
-	values, cols := "", ""
-	valArray := []interface{}{}
-	for k, v := range rowdata {
-		values += "?,"
-		valArray = append(valArray, v)
-		cols += fmt.Sprintf("`%s`,", k)
-	}
-	return fmt.Sprintf("INSERT IGNORE INTO %s.%s (%s) VALUES (%s);", schema, table, cols[:len(cols)-1], values[:len(values)-1]), valArray, nil
+	q := fmt.Sprintf("INSERT IGNORE INTO %s.%s SELECT * FROM %s.%s WHERE `%s` = '%s';", sampleSchema, table, targetSchema, table, refColName, refColData)
+	return q, nil
 }
 
-func getAllDeps(ctx context.Context, dbx *sqlx.DB, targetSchema, sampleSchema string, rel foreignKeyRel, parentRow map[string]interface{}) error {
-	// get all rows that reference the parentRow
-	q := fmt.Sprintf("SELECT * FROM %s.%s WHERE `%s` = '%s';", targetSchema, rel.table, rel.tableCol, parentRow[rel.referencedTableCol])
-	log.Printf("1 #%s query: %s", parentRow["id"], q)
-	rows, err := dbx.QueryxContext(ctx, q)
-	if err != nil {
-		return err
-	}
-	fowardRels, err := fowardRelationships(ctx, dbx.DB, rel.table)
-	if err != nil {
-		return err
-	}
+type parentData struct {
+	fk            foreignKeyConstraint
+	parentRowData []interface{}
+}
 
-	revRes, err := reverseRelationships(ctx, dbx.DB, rel.table)
-	if err != nil {
-		return err
+func makeSampleQuery(targetSchema, anchorTable string, data *parentData) string {
+	if data == nil {
+		return fmt.Sprintf("SELECT * FROM %s.%s LIMIT 1 OFFSET 1200;", targetSchema, anchorTable)
 	}
-
-	dedupQuery := make(map[string]struct{})
-	for rows.Next() {
-		rowData := make(map[string]interface{})
-		rows.MapScan(rowData)
-		// rowData["aoi/op"] = rel.table
-
-		stmts := []map[string][]interface{}{}
-		stmt, vals, err := makeInsertQuery(rowData, dbx.DB, sampleSchema, rel.table)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
+	var whereClause string
+	for idx, pkd := range data.parentRowData {
+		whereClause += fmt.Sprintf("`%s` = '%s'", data.fk.tableCol, pkd)
+		if idx < len(data.parentRowData)-1 {
+			whereClause += " OR "
 		}
-		if stmt != "" {
-			insertQuery := map[string][]interface{}{stmt: vals}
-			stmts = append([]map[string][]interface{}{insertQuery}, stmts...)
-		}
+	}
+	return fmt.Sprintf("SELECT * FROM %s.%s WHERE %s;", targetSchema, anchorTable, whereClause)
 
-		for i := 0; i < len(fowardRels); i++ {
-			// log.Printf("#%s foward rel: vals [ %+s ]  [ %+s ]\n", rowData["id"], rowData[fowardRels[i].tableCol], rowData)
-			if d := rowData[fowardRels[i].tableCol]; d != nil {
-				q := fmt.Sprintf("SELECT * FROM %s.%s WHERE `%s` = '%s';", targetSchema, fowardRels[i].referencedTable, fowardRels[i].referencedTableCol, d)
-				if _, exists := dedupQuery[q]; !exists {
-					log.Printf("foward %+v\n", fowardRels[i])
-					log.Printf("2 #%s query: %s, referenced %s", rowData["id"], q, fowardRels[i].tableCol)
-					dedupQuery[q] = struct{}{}
-					r, err := dbx.QueryxContext(ctx, q)
-					if err != nil {
-						return err
-					}
-					for r.Next() {
-						rd := make(map[string]interface{})
-						r.MapScan(rd)
-						stmt, vals, err := makeInsertQuery(rd, dbx.DB, sampleSchema, fowardRels[i].referencedTable)
-						if err != nil && !errors.Is(err, sql.ErrNoRows) {
-							return err
-						}
-						if stmt != "" {
-							insertQuery := map[string][]interface{}{stmt: vals}
-							stmts = append([]map[string][]interface{}{insertQuery}, stmts...)
-						}
-					}
-				}
-			}
-			tx, err := dbx.DB.BeginTx(ctx, nil)
+}
+
+// inserts all rows referenced by this row via FOREIGN keys
+func insertRowFowardRels(ctx context.Context, db *sqlx.DB, targetSchema, sampleSchema string, rels []foreignKeyConstraint, rowData map[string]interface{}) error {
+	for _, rel := range rels {
+		if columnData := rowData[rel.tableCol]; columnData != nil {
+			stmts := []string{}
+
+			tblPk, err := getTablePrimaryKeyConstraints(ctx, db.DB, targetSchema, rel.referencedTable)
 			if err != nil {
 				return err
 			}
-			for _, query := range stmts {
-				for q, vals := range query {
-					// log.Printf("insert %s :: row %+s\n", q, vals)
-					_, err := tx.ExecContext(ctx, q, vals...)
+			r, err := db.QueryxContext(ctx, fmt.Sprintf("SELECT * FROM %s.%s WHERE `%s` = '%s';", targetSchema, rel.referencedTable, rel.referencedTableCol, columnData))
+			if err != nil {
+				return err
+			}
+			defer r.Close()
+			datas := []map[string]interface{}{}
+			for r.Next() {
+				rd := make(map[string]interface{})
+				r.MapScan(rd)
+				datas = append(datas, rd)
+			}
+
+			moarFowRels, err := fowardRelationships(ctx, db.DB, targetSchema, rel.referencedTable)
+			if err != nil {
+				return err
+			}
+			for _, rd := range datas {
+				if len(moarFowRels) > 0 {
+					err = insertRowFowardRels(ctx, db, targetSchema, sampleSchema, moarFowRels, rd)
 					if err != nil {
-						return fmt.Errorf("tx rolled back %s: %w query { %s row %+s }", tx.Rollback(), err, q, vals)
+						return err
 					}
+				}
+				stmt, err := makeInsertQuery(tblPk.tableCol[0], rd[tblPk.tableCol[0]], targetSchema, sampleSchema, tblPk.table)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				stmts = append([]string{stmt}, stmts...)
+			}
+			tx, err := db.Beginx()
+			if err != nil {
+				return err
+			}
+			for _, q := range stmts {
+				log.Printf("insert %s\n", q)
+				_, err := tx.ExecContext(ctx, q)
+				if err != nil {
+					return fmt.Errorf("tx failed: %s %w query %s", tx.Rollback(), err, q)
 				}
 			}
 			err = tx.Commit()
 			if err != nil {
-				return fmt.Errorf("could not commit tx: %w", err)
+				return err
 			}
 		}
-
-		for _, rel := range revRes {
-			q := fmt.Sprintf("SELECT * FROM %s.%s WHERE `%s` = '%s';", targetSchema, rel.table, rel.tableCol, rowData[rel.referencedTableCol])
-			if _, exists := dedupQuery[q]; !exists {
-				log.Printf("rev %+v\n", rel)
-				log.Printf("3 #%s query: %s", rowData["id"], q)
-				dedupQuery[q] = struct{}{}
-				rows, err := dbx.QueryxContext(ctx, q)
-				if err != nil {
-					return err
-				}
-				for rows.Next() {
-					rowData := make(map[string]interface{})
-					rows.MapScan(rowData)
-					// rowData["aoi/op"] = rel.table
-					err = getAllDeps(ctx, dbx, targetSchema, sampleSchema, rel, rowData)
-					return err
-				}
-			}
-		}
-
 	}
-
 	return nil
 }
 
-func sample(ctx context.Context, db *sql.DB, targetSchema, sampleSchema, anchorTable string) error {
+func sample(ctx context.Context, db *sql.DB, targetSchema, sampleSchema, anchorTable string, data *parentData) error {
 	dbx := sqlx.NewDb(db, "mysql")
-	ancRows, err := dbx.QueryxContext(ctx, fmt.Sprintf("SELECT * FROM %s.%s LIMIT 1;", targetSchema, anchorTable))
-	if err != nil {
-		return err
-	}
-
 	// we find tables we directly reference in the anchorTable via foreign keys
-	fowardRels, err := fowardRelationships(ctx, db, anchorTable)
+	fowardRels, err := fowardRelationships(ctx, db, targetSchema, anchorTable)
 	if err != nil {
 		return err
 	}
-	// we find other tables that reference the anchorTable via foreign keys
-	reverseRels, err := reverseRelationships(ctx, db, anchorTable)
+	tablePkConstraint, err := getTablePrimaryKeyConstraints(ctx, db, sampleSchema, anchorTable)
 	if err != nil {
 		return err
 	}
-
-	log.Printf("main reverse: %+v\n", reverseRels)
-
+	// we'll get all the rows primary key column data and store it here
+	pkData := [][]interface{}{}
+	ancRows, err := dbx.QueryxContext(ctx, makeSampleQuery(targetSchema, anchorTable, data))
+	if err != nil {
+		return err
+	}
+	defer ancRows.Close()
+	datas := []map[string]interface{}{}
 	for ancRows.Next() {
 		ancRowData := make(map[string]interface{})
 		ancRows.MapScan(ancRowData)
-
-		stmts := []map[string][]interface{}{}
-		stmt, vals, err := makeInsertQuery(ancRowData, db, sampleSchema, anchorTable)
+		datas = append(datas, ancRowData)
+	}
+	for _, ancRowData := range datas {
+		pd := []interface{}{}
+		for _, t := range tablePkConstraint.tableCol {
+			pd = append(pd, ancRowData[t])
+		}
+		pkData = append(pkData, pd)
+		err = insertRowFowardRels(ctx, dbx, targetSchema, sampleSchema, fowardRels, ancRowData)
+		if err != nil {
+			return err
+		}
+		q, err := makeInsertQuery(tablePkConstraint.tableCol[0], ancRowData[tablePkConstraint.tableCol[0]], targetSchema, sampleSchema, anchorTable)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if stmt != "" {
-			insertQuery := map[string][]interface{}{stmt: vals}
-			stmts = append([]map[string][]interface{}{insertQuery}, stmts...)
-		}
-
-		for i := 0; i < len(fowardRels); i++ {
-			if d := ancRowData[fowardRels[i].tableCol]; d != nil {
-				q := fmt.Sprintf("SELECT * FROM %s.%s WHERE `%s` = '%s';", targetSchema, fowardRels[i].referencedTable, fowardRels[i].referencedTableCol, d)
-				r, err := dbx.QueryxContext(ctx, q)
-				if err != nil {
-					return err
-				}
-				for r.Next() {
-					rd := make(map[string]interface{})
-					r.MapScan(rd)
-					stmt, vals, err := makeInsertQuery(rd, db, sampleSchema, fowardRels[i].referencedTable)
-					if err != nil && !errors.Is(err, sql.ErrNoRows) {
-						return err
-					}
-					if stmt != "" {
-						insertQuery := map[string][]interface{}{stmt: vals}
-						stmts = append([]map[string][]interface{}{insertQuery}, stmts...)
-					}
-				}
-				trels, err := fowardRelationships(ctx, db, fowardRels[i].referencedTable)
-				if err != nil {
-					return err
-
-				}
-				fowardRels = append(fowardRels, trels...)
-			}
-			tx, err := db.BeginTx(ctx, nil)
-			if err != nil {
-				return err
-			}
-			for _, query := range stmts {
-				for q, vals := range query {
-					// log.Printf("insert %s\n", q)
-					_, err := tx.ExecContext(ctx, q, vals...)
-					if err != nil {
-						return fmt.Errorf("tx rolled back %s: %w query { %s row %+s }", tx.Rollback(), err, q, vals)
-					}
-				}
-			}
-			err = tx.Commit()
-			if err != nil {
-				return fmt.Errorf("could not commit tx: %w", err)
-			}
-		}
-
-		for i := 0; i < len(reverseRels); i++ {
-			err = getAllDeps(ctx, dbx, targetSchema, sampleSchema, reverseRels[i], ancRowData)
-			if err != nil {
-				return err
-			}
+		log.Printf("insert %s\n", q)
+		_, err = dbx.ExecContext(ctx, q)
+		if err != nil {
+			return fmt.Errorf("tx failed: %w query %s ", err, q)
 		}
 	}
+
+	// we find other tables that reference the anchorTable via foreign keys
+	reverseRels, err := reverseRelationships(ctx, db, targetSchema, anchorTable)
+	if err != nil {
+		return err
+	}
+	for _, rel := range reverseRels {
+		var whereClause string
+		var args []interface{}
+		for idx, pkd := range pkData {
+			for idxx, pkc := range pkd {
+				whereClause += fmt.Sprintf("`%s` = '%s'", rel.tableCol, pkc)
+				if idxx < len(pkd)-1 {
+					whereClause += " OR "
+				}
+			}
+			args = append(args, pkd[0])
+			if idx < len(pkData)-1 {
+				whereClause += " OR "
+			}
+		}
+		if whereClause == "" {
+			continue
+		}
+		err = sample(ctx, dbx.DB, targetSchema, sampleSchema, rel.table, &parentData{fk: rel, parentRowData: args})
+		if err != nil {
+			return err
+		}
+		q := fmt.Sprintf("INSERT IGNORE INTO %s.%s SELECT * FROM %s.%s WHERE %s;", sampleSchema, rel.table, targetSchema, rel.table, whereClause)
+		log.Printf("insert %s\n", q)
+		_, err = dbx.ExecContext(ctx, q)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
