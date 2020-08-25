@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 	"time"
 
@@ -52,13 +53,6 @@ func main() {
 	err = copySchema(context.TODO(), db, *targetSchema, sampleSchemaName, noSmplTbls)
 	if err != nil {
 		log.Fatalf("could not copy schema: %s", err)
-	}
-
-	for whitelistedTable := range noSmplTbls {
-		err = sample(context.TODO(), db, *targetSchema, sampleSchemaName, whitelistedTable, nil)
-		if err != nil {
-			log.Fatalf("could not sample db: %s", err)
-		}
 	}
 
 	err = sample(context.TODO(), db, *targetSchema, sampleSchemaName, *anchorTable, nil)
@@ -255,12 +249,35 @@ func makeSampleQuery(targetSchema, anchorTable string, data *parentData) string 
 
 }
 
+type nodeVisitCache struct {
+	columnName string
+	data       interface{}
+}
+
+var (
+	// key: table name, val: map[columnName]columnData
+	fowardNodeVisit = make(map[string][]nodeVisitCache)
+)
+
 // inserts all rows referenced by this row via FOREIGN keys
 func insertRowFowardRels(ctx context.Context, db *sqlx.DB, targetSchema, sampleSchema string, rels []foreignKeyConstraint, rowData map[string]interface{}) error {
 	for _, rel := range rels {
 		if columnData := rowData[rel.tableCol]; columnData != nil {
-			stmts := []string{}
+			dup := false
+			tableCache := fowardNodeVisit[rel.referencedTable]
+			for _, node := range tableCache {
+				if node.columnName == rel.referencedTableCol && reflect.DeepEqual(node.data, columnData) {
+					dup = true
+					break
+				}
+			}
+			if dup {
+				continue
+			}
+			tableCache = append(tableCache, nodeVisitCache{rel.referencedTableCol, columnData})
+			fowardNodeVisit[rel.referencedTable] = tableCache
 
+			stmts := []string{}
 			tblPk, err := getTablePrimaryKeyConstraints(ctx, db.DB, targetSchema, rel.referencedTable)
 			if err != nil {
 				return err
