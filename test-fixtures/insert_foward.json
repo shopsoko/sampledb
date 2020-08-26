@@ -1,0 +1,23 @@
+[
+    {
+        "table": "dept_emp",
+        "pk": [
+            { "column": "emp_no", "data": "10001"},
+            { "column": "dept_no", "data": "d001"}
+        ],
+        "rels": [
+            {
+                "column": "emp_no",
+                "data": "10001",
+                "referenced_table": "employees",
+                "referenced_column": "emp_no"
+            },
+            {
+                "column": "dept_no",
+                "data": "d001",
+                "referenced_table": "departments",
+                "referenced_column": "dept_no"
+            }
+        ]
+    }
+]

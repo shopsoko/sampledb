@@ -138,8 +138,6 @@ type foreignKeyConstraint struct {
 	tableCol           string
 	referencedTable    string
 	referencedTableCol string
-	// if true, make sure you call norm()..bad but for now WEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE!
-	reverse bool
 }
 
 type primaryKeyConstraint struct {
@@ -213,8 +211,7 @@ func reverseRelationships(ctx context.Context, db *sql.DB, schema, table string)
 			return nil, err
 		}
 		rels = append(rels, foreignKeyConstraint{
-			reverse: true,
-			table:   tableName, referencedTable: table,
+			table: tableName, referencedTable: table,
 			tableCol: colName, referencedTableCol: refColName,
 		})
 	}
@@ -236,7 +233,7 @@ type parentData struct {
 
 func makeSampleQuery(targetSchema, anchorTable string, data *parentData) string {
 	if data == nil {
-		return fmt.Sprintf("SELECT * FROM %s.%s LIMIT 1 OFFSET 1200;", targetSchema, anchorTable)
+		return fmt.Sprintf("SELECT * FROM %s.%s LIMIT 10 OFFSET 1200;", targetSchema, anchorTable)
 	}
 	var whereClause string
 	for idx, pkd := range data.parentRowData {
@@ -246,7 +243,6 @@ func makeSampleQuery(targetSchema, anchorTable string, data *parentData) string 
 		}
 	}
 	return fmt.Sprintf("SELECT * FROM %s.%s WHERE %s;", targetSchema, anchorTable, whereClause)
-
 }
 
 type nodeVisitCache struct {

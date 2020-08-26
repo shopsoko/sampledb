@@ -1,0 +1,27 @@
+[
+    {
+        "table": "employees",
+        "reverse_rels": [
+            {
+                "table": "dept_emp",
+                "column": "emp_no",
+                "referenced_column": "emp_no"
+            },
+            {
+                "table": "titles",
+                "column": "emp_no",
+                "referenced_column": "emp_no"
+            }
+        ]
+    },
+    {
+        "table": "departments",
+        "reverse_rels": [
+            {
+                "table": "dept_emp",
+                "column": "dept_no",
+                "referenced_column": "dept_no"
+            }
+        ]
+    }
+]

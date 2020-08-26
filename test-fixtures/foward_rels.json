@@ -1,0 +1,21 @@
+[
+    {
+        "table": "dept_emp",
+        "foward_rels": [
+            {
+                "column": "emp_no",
+                "referenced_column": "emp_no",
+                "referenced_table": "employees"
+            },
+            {
+                "column": "dept_no",
+                "referenced_column": "dept_no",
+                "referenced_table": "departments"
+            }
+        ]
+    },
+    {
+        "table": "employees",
+        "foward_rels": []
+    }
+]
