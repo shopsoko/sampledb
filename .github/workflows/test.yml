@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-18.04
     steps:
       - uses: actions/checkout@v2
+
       - name: Test build
         run: go test -timeout 120s -v;
         env:
@@ -30,4 +31,57 @@ jobs:
             - 3306
         options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
 
-         
+  create-prelease:
+     # needs: [run-tests]
+     runs-on: ubuntu-18.04
+     if: github.event_name == 'push' && endsWith(github.ref, 'master')
+     steps:
+      - uses: actions/checkout@v2
+      
+      - name: Build binaries
+        id: build_binaries
+        env: 
+          PKG_NAME: sampledb
+        run: |
+          assetDir=binaries
+          mkdir assetDir
+
+          platforms=("linux/amd64" "linux/386" "darwin/amd64")
+          for platform in "${platforms[@]}"
+          do
+          
+          platform_split=(${platform//\// })
+          GOOS=${platform_split[0]}
+          GOARCH=${platform_split[1]}
+
+          output_name=$PKG_NAME'-'$GOOS'-'$GOARCH
+          if [ $GOOS = "windows" ]; then
+              output_name+='.exe'
+          fi
+
+          env GOOS=$GOOS GOARCH=$GOARCH go build -o $assetDir/$output_name $package
+          if [ $? -ne 0 ]; then
+            echo 'An error has occurred! Aborting the script execution...'
+            exit 1
+          fi
+
+          done
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ format('{0}-{1}', github.ref, github.run_number) }}
+          release_name: PreRelease ${{ github.sha }}
+          draft: false
+          prerelease: true
+
+      - name: Upload Assets
+        id: upload_assets
+        uses: AButler/upload-release-assets@v2.0
+        with:
+          files: 'binaries/*'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          release-tag: ${{ format('{0}-{1}', github.ref, github.run_number) }}
