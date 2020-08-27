@@ -16,17 +16,25 @@ import (
 )
 
 var (
-	DATABASE_HOST string
-	DATABASE_PORT string
-	DATABASE_USER string
-	DATABASE_PASS string
+	DATABASE_HOST = "localhost"
+	DATABASE_PORT = "3306"
+	DATABASE_USER = "root"
+	DATABASE_PASS = "root"
 )
 
 func TestMain(m *testing.M) {
-	DATABASE_HOST = os.Getenv("DATABASE_HOST")
-	DATABASE_PORT = os.Getenv("DATABASE_PORT")
-	DATABASE_USER = os.Getenv("DATABASE_USER")
-	DATABASE_PASS = os.Getenv("DATABASE_PASS")
+	if os.Getenv("DATABASE_HOST") != "" {
+		DATABASE_HOST = os.Getenv("DATABASE_HOST")
+	}
+	if os.Getenv("DATABASE_PORT") != "" {
+		DATABASE_PORT = os.Getenv("DATABASE_PORT")
+	}
+	if os.Getenv("DATABASE_USER") != "" {
+		DATABASE_USER = os.Getenv("DATABASE_USER")
+	}
+	if os.Getenv("DATABASE_PASS") != "" {
+		DATABASE_PASS = os.Getenv("DATABASE_PASS")
+	}
 	os.Exit(m.Run())
 }
 
@@ -335,7 +343,7 @@ func TestSample(t *testing.T) {
 	if err != nil {
 		log.Fatalf("could not copy schema: %s", err)
 	}
-	err = sample(context.TODO(), db, targetSchema, sampleSchemaName, "project_project", nil)
+	err = sample(context.TODO(), db, targetSchema, sampleSchemaName, &sampleParams{rand: true, table: "project_project"})
 	if err != nil {
 		t.Fatal(err)
 	}
