@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,7 +16,45 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// usage: sampledb -driver=dbdriver -host=dbhost -port=port -user=user -pass -targetschema=targetschema -sampleschema=sampleschema -anchor=table_name -nosample=tbl1,tbl2
+var (
+	anchorParamsRE = regexp.MustCompile(`^(?P<table>\w+)(?:#(?P<column>\w+)=(?P<values>(?:\w+[,]?)+)*|$)`)
+)
+
+type sampleParams struct {
+	rand   bool
+	table  string
+	column string
+	data   []interface{}
+}
+
+func getAnchorTableWithParams(anchorTableFlagString string) sampleParams {
+	matches := anchorParamsRE.MatchString(anchorTableFlagString)
+	if !matches {
+		flag.PrintDefaults()
+		log.Fatalf("bad format for anchor table params")
+	}
+	res := anchorParamsRE.FindAllStringSubmatch(anchorTableFlagString, -1)
+	data := make(map[string]string)
+	sxp := anchorParamsRE.SubexpNames()
+	for i, mm := range res[0] {
+		if i == 0 {
+			continue
+		}
+		data[sxp[i]] = mm
+	}
+	columnData := []interface{}{}
+	for _, val := range strings.Split(data["values"], ",") {
+		if val != "" {
+			columnData = append(columnData, val)
+		}
+	}
+	if len(columnData) <= 0 {
+		return sampleParams{table: data["table"], rand: true}
+	}
+	return sampleParams{table: data["table"], column: data["column"], data: columnData}
+}
+
+// usage: sampledb -driver=dbdriver -host=dbhost -port=port -user=user -pass -targetschema=targetschema -sampleschema=sampleschema -anchor=table_name#col=val,val -nosample=tbl1,tbl2
 func main() {
 	driver := flag.String("driver", "mysql", "db driver")
 	host := flag.String("host", "localhost", "db host")
@@ -24,7 +63,9 @@ func main() {
 	pass := flag.String("pass", "root", "db user pass")
 	targetSchema := flag.String("targetschema", "", "target schema name")
 	sampleSchema := flag.String("sampleschema", "defaults to sample_db_{secs since January 1, 1970 UTC}", "sample schema name")
-	anchorTable := flag.String("anchor", "", "table from which we'll start looking fot relationships")
+	anchorTable := flag.String("anchor", "",
+		"table from which we'll start looking fot relationships, you can prepend a # followed by a list of comma separated ids after the table name to get specific "+
+			"rows only, otherwise we'll randomly select 5 rows.\nfor example: \n\t-anchor=table#column=value,value,value&column=value,value,value")
 	noSampleTable := flag.String("nosample", "", "comma separated list of tables name which will be copied in full")
 
 	flag.Parse()
@@ -38,6 +79,9 @@ func main() {
 
 	}
 
+	// parse anchor table params from the flag value
+	sampleParams := getAnchorTableWithParams(*anchorTable)
+
 	db, err := connectDB(*driver, *host, *port, *user, *pass)
 	if err != nil {
 		log.Fatalf("could not connect to db: %s", err)
@@ -50,12 +94,13 @@ func main() {
 			noSmplTbls[tbl] = struct{}{}
 		}
 	}
+
 	err = copySchema(context.TODO(), db, *targetSchema, sampleSchemaName, noSmplTbls)
 	if err != nil {
 		log.Fatalf("could not copy schema: %s", err)
 	}
 
-	err = sample(context.TODO(), db, *targetSchema, sampleSchemaName, *anchorTable, nil)
+	err = sample(context.TODO(), db, *targetSchema, sampleSchemaName, &sampleParams)
 	if err != nil {
 		log.Fatalf("could not sample db: %s", err)
 	}
@@ -226,23 +271,18 @@ func makeInsertQuery(refColName string, refColData interface{}, targetSchema, sa
 	return q, nil
 }
 
-type parentData struct {
-	fk            foreignKeyConstraint
-	parentRowData []interface{}
-}
-
-func makeSampleQuery(targetSchema, anchorTable string, data *parentData) string {
-	if data == nil {
-		return fmt.Sprintf("SELECT * FROM %s.%s LIMIT 10 OFFSET 1200;", targetSchema, anchorTable)
+func makeSampleQuery(targetSchema string, params *sampleParams) string {
+	if params.rand {
+		return fmt.Sprintf("SELECT * FROM %s.%s ORDER BY RAND() LIMIT 5;", targetSchema, params.table)
 	}
 	var whereClause string
-	for idx, pkd := range data.parentRowData {
-		whereClause += fmt.Sprintf("`%s` = '%s'", data.fk.tableCol, pkd)
-		if idx < len(data.parentRowData)-1 {
+	for i, param := range params.data {
+		whereClause += fmt.Sprintf("`%s` = '%s'", params.column, param)
+		if i < len(params.data)-1 {
 			whereClause += " OR "
 		}
 	}
-	return fmt.Sprintf("SELECT * FROM %s.%s WHERE %s;", targetSchema, anchorTable, whereClause)
+	return fmt.Sprintf("SELECT * FROM %s.%s WHERE %s;", targetSchema, params.table, whereClause)
 }
 
 type nodeVisitCache struct {
@@ -327,20 +367,20 @@ func insertRowFowardRels(ctx context.Context, db *sqlx.DB, targetSchema, sampleS
 	return nil
 }
 
-func sample(ctx context.Context, db *sql.DB, targetSchema, sampleSchema, anchorTable string, data *parentData) error {
+func sample(ctx context.Context, db *sql.DB, targetSchema, sampleSchema string, params *sampleParams) error {
 	dbx := sqlx.NewDb(db, "mysql")
 	// we find tables we directly reference in the anchorTable via foreign keys
-	fowardRels, err := fowardRelationships(ctx, db, targetSchema, anchorTable)
+	fowardRels, err := fowardRelationships(ctx, db, targetSchema, params.table)
 	if err != nil {
 		return err
 	}
-	tablePkConstraint, err := getTablePrimaryKeyConstraints(ctx, db, sampleSchema, anchorTable)
+	tablePkConstraint, err := getTablePrimaryKeyConstraints(ctx, db, sampleSchema, params.table)
 	if err != nil {
 		return err
 	}
 	// we'll get all the rows primary key column data and store it here
 	pkData := [][]interface{}{}
-	ancRows, err := dbx.QueryxContext(ctx, makeSampleQuery(targetSchema, anchorTable, data))
+	ancRows, err := dbx.QueryxContext(ctx, makeSampleQuery(targetSchema, params))
 	if err != nil {
 		return err
 	}
@@ -361,7 +401,7 @@ func sample(ctx context.Context, db *sql.DB, targetSchema, sampleSchema, anchorT
 		if err != nil {
 			return err
 		}
-		q, err := makeInsertQuery(tablePkConstraint.tableCol[0], ancRowData[tablePkConstraint.tableCol[0]], targetSchema, sampleSchema, anchorTable)
+		q, err := makeInsertQuery(tablePkConstraint.tableCol[0], ancRowData[tablePkConstraint.tableCol[0]], targetSchema, sampleSchema, params.table)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -372,8 +412,8 @@ func sample(ctx context.Context, db *sql.DB, targetSchema, sampleSchema, anchorT
 		}
 	}
 
-	// we find other tables that reference the anchorTable via foreign keys
-	reverseRels, err := reverseRelationships(ctx, db, targetSchema, anchorTable)
+	// we find other tables that reference the params.table via foreign keys
+	reverseRels, err := reverseRelationships(ctx, db, targetSchema, params.table)
 	if err != nil {
 		return err
 	}
@@ -395,7 +435,7 @@ func sample(ctx context.Context, db *sql.DB, targetSchema, sampleSchema, anchorT
 		if whereClause == "" {
 			continue
 		}
-		err = sample(ctx, dbx.DB, targetSchema, sampleSchema, rel.table, &parentData{fk: rel, parentRowData: args})
+		err = sample(ctx, dbx.DB, targetSchema, sampleSchema, &sampleParams{table: rel.table, column: rel.tableCol, data: args})
 		if err != nil {
 			return err
 		}
