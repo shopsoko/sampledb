@@ -12,12 +12,14 @@ on:
       - master
 
 jobs:
-  test-build:
+  run-tests:
     runs-on: ubuntu-18.04
     steps:
       - uses: actions/checkout@v2
       - name: Test build
         run: go test -timeout 120s -v;
+        env:
+          DATABASE_PORT: ${{ job.services.mysql.ports[3306] }}
     services:
       mysql:
         image: mysql:5.7
