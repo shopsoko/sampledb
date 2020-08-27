@@ -1,0 +1,33 @@
+name: Run Tests
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - v*
+
+  pull_request:
+    branches: 
+      - master
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-18.04
+    steps:
+      - uses: actions/checkout@v2
+      - name: Test build
+        run: go test -timeout 120s -v;
+        env:
+          DATABASE_PORT: ${{ job.services.mysql.ports[3306] }}
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+            MYSQL_ROOT_PASSWORD: root
+            MYSQL_DATABASE: test
+        ports:
+            - 3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
+         
