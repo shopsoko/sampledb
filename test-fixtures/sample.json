@@ -1,0 +1,39 @@
+[
+    {
+        "sampled": "employees",
+        "column": "emp_no",
+        "data": [
+            "10001"
+        ],
+        "deps": [
+            {
+                "table": "departments",
+                "rows": [
+                    {
+                        "columns": [
+                            "dept_no"
+                        ],
+                        "data": [
+                            "d001"
+                        ]
+                    }
+                ]
+            },
+            {
+                "table": "dept_emp",
+                "rows": [
+                    {
+                        "columns": [
+                            "emp_no",
+                            "dept_no"
+                        ],
+                        "data": [
+                            "10001",
+                            "d001"
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+]
