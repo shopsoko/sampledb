@@ -54,7 +54,7 @@ func getAnchorTableWithParams(anchorTableFlagString string) sampleParams {
 	return sampleParams{table: data["table"], column: data["column"], data: columnData}
 }
 
-// usage: sampledb -driver=dbdriver -host=dbhost -port=port -user=user -pass -targetschema=targetschema -sampleschema=sampleschema -anchor=table_name#col=val,val -nosample=tbl1,tbl2
+// usage: sampledb -driver=dbdriver -host=dbhost -port=port -user=user -pass=pass -targetschema=targetschema -sampleschema=sampleschema -anchor=table_name#col=val,val -nosample=tbl1,tbl2
 func main() {
 	driver := flag.String("driver", "mysql", "db driver")
 	host := flag.String("host", "localhost", "db host")
@@ -65,7 +65,7 @@ func main() {
 	sampleSchema := flag.String("sampleschema", "defaults to sample_db_{secs since January 1, 1970 UTC}", "sample schema name")
 	anchorTable := flag.String("anchor", "",
 		"table from which we'll start looking fot relationships, you can prepend a # followed by a list of comma separated ids after the table name to get specific "+
-			"rows only, otherwise we'll randomly select 5 rows.\nfor example: \n\t-anchor=table#column=value,value,value&column=value,value,value")
+			"rows only, otherwise we'll randomly select 5 rows.\nfor example: \n\t-anchor=table#column=value,value,value")
 	noSampleTable := flag.String("nosample", "", "comma separated list of tables name which will be copied in full")
 
 	flag.Parse()
