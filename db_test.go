@@ -332,10 +332,28 @@ func TestSample(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	targetSchema, sampleSchemaName := "dev_vrp", fmt.Sprintf("test_sample_schema_%d", time.Now().Unix())
+	testDataPath := filepath.Join("test-fixtures", "sample.sql")
+	testData, err := ioutil.ReadFile(testDataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(string(testData))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	targetSchema, sampleSchemaName := "sample", fmt.Sprintf("test_sample_schema_%d", time.Now().Unix())
 	err = copySchema(context.TODO(), db, targetSchema, sampleSchemaName, map[string]struct{}{})
 	defer func() {
 		_, err := db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s;", sampleSchemaName))
+		if err != nil {
+			log.Printf("err during clean up: %s\n", err)
+		}
+		testData, err := ioutil.ReadFile(filepath.Join("test-fixtures", "sample_down.sql"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = db.Exec(string(testData))
 		if err != nil {
 			log.Printf("err during clean up: %s\n", err)
 		}
@@ -343,9 +361,89 @@ func TestSample(t *testing.T) {
 	if err != nil {
 		log.Fatalf("could not copy schema: %s", err)
 	}
-	err = sample(context.TODO(), db, targetSchema, sampleSchemaName, &sampleParams{rand: true, table: "project_project"})
+
+	type sampleStruct struct {
+		Sampled string   `json:"sampled"`
+		Column  string   `json:"column"`
+		Data    []string `json:"data"`
+		Deps    []struct {
+			Table string `json:"table"`
+			Rows  []struct {
+				Columns []string `json:"columns"`
+				Data    []string `json:"data"`
+			} `json:"rows"`
+		} `json:"deps"`
+	}
+
+	testDataVal, err := ioutil.ReadFile(filepath.Join("test-fixtures", "sample.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	datas := []sampleStruct{}
+	err = json.Unmarshal(testDataVal, &datas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, data := range datas {
+		paramData := []interface{}{}
+		for _, d := range data.Data {
+			paramData = append(paramData, d)
+		}
+
+		params := &sampleParams{table: data.Sampled, column: data.Column, data: paramData}
+		err = sample(context.TODO(), db, targetSchema, sampleSchemaName, params)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		rows, err := db.Query(makeSampleQuery(sampleSchemaName, params))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			t.FailNow()
+		}
+		for rows.Next() {
+			var pk string
+			err = rows.Scan(&pk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pk != params.data[0] {
+				t.FailNow()
+			}
+		}
+
+		for _, dep := range data.Deps {
+			var whereClause string
+			for _, row := range dep.Rows {
+				for idx, col := range row.Columns {
+					whereClause += fmt.Sprintf("`%s` = '%s'", col, row.Data[idx])
+					if idx < len(row.Columns)-1 {
+						whereClause += " AND "
+					}
+				}
+			}
+			rowData, err := db.Query(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s WHERE %s;", sampleSchemaName, dep.Table, whereClause))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rowData.Close()
+			if !rowData.Next() {
+				t.FailNow()
+			}
+			for rowData.Next() {
+				var count int
+				err = rows.Scan(&count)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if count != len(dep.Rows) {
+					t.FailNow()
+				}
+			}
+		}
+	}
 }
